@@ -115,6 +115,6 @@ class DataProcessor(object):
         with open(input_file, 'r', encoding='utf-8') as f:
             data = f.readlines()
             lines = []
-            for i in data[:200]:
+            for i in data:
                 lines.append(json.loads(i, encoding='utf8'))
             return lines
