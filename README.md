@@ -159,6 +159,12 @@ python convert_albert_tf_checkpoint_to_pytorch.py \
 | albert_base(pytorch) | 87.4 | 86.4 |
 | albert_tiny | 85.１ | 85.3 |
 
+观点型阅读理解任务任务：OPMRC(option machine reading comprehension)
+（跑了3轮没收敛）
+
+| 模型 | 开发集(Dev) | 
+| :------- | :---------: | 
+| albert_base(pytorch) | 75.5 | 
 
 
 
