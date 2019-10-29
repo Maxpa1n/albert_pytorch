@@ -54,9 +54,15 @@ MODEL_CLASSES = {
 def train(args, train_dataset, model, tokenizer):
     """ Train the model """
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size,
-                                  collate_fn=collate_fn)
+    if args.horovod:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_dataset, num_replicas=args.hvd_size, rank=args.rank)
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset, args.train_batch_size, sampler=train_sampler, collate_fn=collate_fn, **args.kwargs)
+    else:
+        train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+        train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size,
+                                      collate_fn=collate_fn)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -71,7 +77,14 @@ def train(args, train_dataset, model, tokenizer):
          'weight_decay': args.weight_decay},
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
-    optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
+    optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate * args.hvd_size, eps=args.adam_epsilon)
+    if args.horovod:
+        args.hvd.broadcast_parameters(model.state_dict(), root_rank=0)
+        args.hvd.broadcast_optimizer_state(optimizer, root_rank=0)
+        compression = args.hvd.Compression.fp16 if args.fp16_allreduce else args.hvd.Compression.none
+        optimizer = args.hvd.DistributedOptimizer(optimizer,
+                                                  named_parameters=model.named_parameters(),
+                                                  compression=compression)
     scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
     if args.fp16:
         try:
@@ -109,7 +122,8 @@ def train(args, train_dataset, model, tokenizer):
         pbar = ProgressBar(n_total=len(train_dataloader), desc='Training')
         for step, batch in enumerate(train_dataloader):
             model.train()
-            batch = tuple(t.to(args.device) for t in batch)
+            # batch = tuple(t.to(args.device) for t in batch)
+            batch = tuple(t.cuda() for t in batch)
             inputs = {'input_ids': batch[0],
                       'attention_mask': batch[1],
                       'labels': batch[3]}
@@ -175,9 +189,16 @@ def evaluate(args, model, tokenizer, prefix=""):
 
         args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
         # Note that DistributedSampler samples randomly
-        eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(eval_dataset)
-        eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size,
-                                     collate_fn=collate_fn)
+        if args.horovod:
+            eval_sampler = torch.utils.data.distributed.DistributedSampler(
+                eval_dataset, num_replicas=args.hvd_size, rank=args.rank)
+            eval_dataloader = torch.utils.data.DataLoader(
+                eval_dataset, batch_size=args.train_batch_size, collate_fn=collate_fn,
+                sampler=eval_sampler, **args.kwargs)
+        else:
+            eval_sampler = SequentialSampler(eval_dataset) if args.local_rank == -1 else DistributedSampler(eval_dataset)
+            eval_dataloader = DataLoader(eval_dataset, sampler=eval_sampler, batch_size=args.train_batch_size,
+                                          collate_fn=collate_fn)
 
         # Eval!
         logger.info("***** Running evaluation {} *****".format(prefix))
@@ -190,7 +211,8 @@ def evaluate(args, model, tokenizer, prefix=""):
         pbar = ProgressBar(n_total=len(eval_dataloader), desc="Evaluating")
         for step, batch in enumerate(eval_dataloader):
             model.eval()
-            batch = tuple(t.to(args.device) for t in batch)
+            # batch = tuple(t.to(args.device) for t in batch)
+            batch = tuple(t.cuda() for t in batch)
             with torch.no_grad():
                 inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
@@ -250,7 +272,8 @@ def predict(args, model, tokenizer, prefix=""):
         pbar = ProgressBar(n_total=len(pred_dataloader), desc="Predicting")
         for step, batch in enumerate(pred_dataloader):
             model.eval()
-            batch = tuple(t.to(args.device) for t in batch)
+            # batch = tuple(t.to(args.device) for t in batch)
+            batch = tuple(t.cuda() for t in batch)
             with torch.no_grad():
                 inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
@@ -424,6 +447,10 @@ def main():
                         help="For distributed training: local_rank")
     parser.add_argument('--server_ip', type=str, default='', help="For distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="For distant debugging.")
+    parser.add_argument('--horovod', action='store_true',
+                        help="using horovod")
+    parser.add_argument('--fp16-allreduce', action='store_true', default=False,
+                        help='use fp16 compression during allreduce')
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
@@ -487,7 +514,22 @@ def main():
     if args.local_rank == 0:
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
-    model.to(args.device)
+    # horovod training
+    if args.horovod:
+        try:
+            import horovod.torch as hvd
+        except ImportError:
+            raise ImportError("Please install horovod from https://github.com/horovod to use horovod training.")
+        hvd.init()
+        torch.cuda.set_device(hvd.local_rank())
+        torch.cuda.manual_seed(args.seed)
+        args.kwargs = {'num_workers': 1, 'pin_memory': True}
+        args.hvd_size = hvd.size()
+        args.rank = hvd.rank()
+        args.hvd = hvd
+
+    # model.to(args.device)
+    model.cuda()
 
     logger.info("Training/evaluation parameters %s", args)
 
@@ -517,7 +559,8 @@ def main():
         # Load a trained model and vocabulary that you have fine-tuned
         model = model_class.from_pretrained(args.output_dir)
         tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        model.to(args.device)
+        # model.to(args.device)
+        model.cuda()
 
     # Evaluation
     results = []
@@ -537,7 +580,8 @@ def main():
             prefix = checkpoint.split('/')[-1] if checkpoint.find('checkpoint') != -1 else ""
 
             model = model_class.from_pretrained(checkpoint)
-            model.to(args.device)
+            # model.to(args.device)
+            model.cuda()
             result = evaluate(args, model, tokenizer, prefix=prefix)
             results.extend([(k + '_{}'.format(global_step), v) for k, v in result.items()])
         output_eval_file = os.path.join(args.output_dir, "checkpoint_eval_results.txt")
