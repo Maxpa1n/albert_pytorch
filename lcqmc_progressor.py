@@ -2,7 +2,7 @@ import torch
 import csv
 from callback.progressbar import ProgressBar
 from model.tokenization_bert import BertTokenizer
-from common.tools import logger
+from tools.common import logger
 from torch.utils.data import TensorDataset
 
 
