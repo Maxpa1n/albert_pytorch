@@ -77,14 +77,17 @@ def train(args, train_dataset, model, tokenizer):
          'weight_decay': args.weight_decay},
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
-    optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate * args.hvd_size, eps=args.adam_epsilon)
+
     if args.horovod:
+        optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate * args.hvd_size, eps=args.adam_epsilon)
         args.hvd.broadcast_parameters(model.state_dict(), root_rank=0)
         args.hvd.broadcast_optimizer_state(optimizer, root_rank=0)
         compression = args.hvd.Compression.fp16 if args.fp16_allreduce else args.hvd.Compression.none
         optimizer = args.hvd.DistributedOptimizer(optimizer,
                                                   named_parameters=model.named_parameters(),
                                                   compression=compression)
+    else:
+        optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate, eps=args.adam_epsilon)
     scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=t_total)
     if args.fp16:
         try:
@@ -123,7 +126,10 @@ def train(args, train_dataset, model, tokenizer):
         for step, batch in enumerate(train_dataloader):
             model.train()
             # batch = tuple(t.to(args.device) for t in batch)
-            batch = tuple(t.cuda() for t in batch)
+            if not args.no_cuda:
+                batch = tuple(t.cuda() for t in batch)
+            else:
+                batch = tuple(t for t in batch)
             inputs = {'input_ids': batch[0],
                       'attention_mask': batch[1],
                       'labels': batch[3]}
@@ -211,8 +217,10 @@ def evaluate(args, model, tokenizer, prefix=""):
         pbar = ProgressBar(n_total=len(eval_dataloader), desc="Evaluating")
         for step, batch in enumerate(eval_dataloader):
             model.eval()
-            # batch = tuple(t.to(args.device) for t in batch)
-            batch = tuple(t.cuda() for t in batch)
+            if not args.no_cuda:
+                batch = tuple(t.cuda() for t in batch)
+            else:
+                batch = tuple(t for t in batch)
             with torch.no_grad():
                 inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
@@ -272,8 +280,10 @@ def predict(args, model, tokenizer, prefix=""):
         pbar = ProgressBar(n_total=len(pred_dataloader), desc="Predicting")
         for step, batch in enumerate(pred_dataloader):
             model.eval()
-            # batch = tuple(t.to(args.device) for t in batch)
-            batch = tuple(t.cuda() for t in batch)
+            if not args.no_cuda:
+                batch = tuple(t.cuda() for t in batch)
+            else:
+                batch = tuple(t for t in batch)
             with torch.no_grad():
                 inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
@@ -529,7 +539,8 @@ def main():
         args.hvd = hvd
 
     # model.to(args.device)
-    model.cuda()
+    if not args.no_cuda:
+        model.cuda()
 
     logger.info("Training/evaluation parameters %s", args)
 
@@ -560,7 +571,8 @@ def main():
         model = model_class.from_pretrained(args.output_dir)
         tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
         # model.to(args.device)
-        model.cuda()
+        if not args.no_cuda:
+            model.cuda()
 
     # Evaluation
     results = []
@@ -581,7 +593,8 @@ def main():
 
             model = model_class.from_pretrained(checkpoint)
             # model.to(args.device)
-            model.cuda()
+            if not args.no_cuda:
+                model.cuda()
             result = evaluate(args, model, tokenizer, prefix=prefix)
             results.extend([(k + '_{}'.format(global_step), v) for k, v in result.items()])
         output_eval_file = os.path.join(args.output_dir, "checkpoint_eval_results.txt")
