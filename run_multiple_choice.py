@@ -31,7 +31,7 @@ from model.tokenization_bert import BertTokenizer
 from model.file_utils import WEIGHTS_NAME
 from model.optimization import AdamW, WarmupLinearSchedule
 
-from metrics.glue_compute_metrics import compute_metrics
+from metrics.glue_compute_metrics import compute_metrics, compute_metrics_distribution
 # from processors import glue_output_modes as output_modes
 from processors.multiple_choice import multiple_output_modes as output_modes
 
@@ -253,7 +253,11 @@ def evaluate(args, model, tokenizer, prefix=""):
             preds = np.argmax(preds, axis=1)
         elif args.output_mode == "regression":
             preds = np.squeeze(preds)
-        result = compute_metrics(eval_task, preds, out_label_ids)
+        if args.horovod:
+            result = compute_metrics_distribution(args, eval_task, preds, out_label_ids)
+        else:
+            result = compute_metrics(eval_task, preds, out_label_ids)
+
         results.update(result)
         logger.info("***** Eval results {} *****".format(prefix))
         for key in sorted(result.keys()):
