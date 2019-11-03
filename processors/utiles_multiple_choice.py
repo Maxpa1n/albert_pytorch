@@ -117,4 +117,4 @@ class DataProcessor(object):
             lines = []
             for i in data:
                 lines.append(json.loads(i, encoding='utf8'))
-            return lines
+            return lines[:200]
