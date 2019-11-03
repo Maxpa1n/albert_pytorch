@@ -182,6 +182,12 @@ def train(args, train_dataset, model, tokenizer):
     return global_step, tr_loss / global_step
 
 
+def metric_average(args, val, name):
+    tensor = torch.tensor(val)
+    avg_tensor = args.hvd.allreduce(tensor, name=name)
+    return avg_tensor.item()
+
+
 def evaluate(args, model, tokenizer, prefix=""):
     # Loop to handle MNLI double evaluation (matched, mis-matched)
     eval_task_names = ("mnli", "mnli-mm") if args.task_name == "mnli" else (args.task_name,)
@@ -251,7 +257,7 @@ def evaluate(args, model, tokenizer, prefix=""):
         results.update(result)
         logger.info("***** Eval results {} *****".format(prefix))
         for key in sorted(result.keys()):
-            logger.info("  %s = %s", key, str(result[key]))
+            logger.info("  %s = %s", key, str(result))
     return results
 
 
@@ -326,6 +332,7 @@ def load_and_cache_examples(args, task, tokenizer, data_type='train'):
     if os.path.exists(cached_features_file):
         logger.info("Loading features from cached file %s", cached_features_file)
         features = torch.load(cached_features_file)
+        features = features[:6]
     else:
         logger.info("Creating features from dataset file at %s", args.data_dir)
         label_list = processor.get_labels()
@@ -350,6 +357,7 @@ def load_and_cache_examples(args, task, tokenizer, data_type='train'):
                                                 pad_token=tokenizer.convert_tokens_to_ids([tokenizer.pad_token])[0],
                                                 pad_token_segment_id=4 if 'xlnet' in args.model_type else 0,
                                                 )
+        features = features[:6]
         if args.local_rank in [-1, 0]:
             logger.info("Saving features into cached file %s", cached_features_file)
             torch.save(features, cached_features_file)
@@ -531,7 +539,7 @@ def main():
         except ImportError:
             raise ImportError("Please install horovod from https://github.com/horovod to use horovod training.")
         hvd.init()
-        torch.cuda.set_device(hvd.local_rank())
+        # torch.cuda.set_device(hvd.local_rank())
         torch.cuda.manual_seed(args.seed)
         args.kwargs = {'num_workers': 1, 'pin_memory': True}
         args.hvd_size = hvd.size()
@@ -564,15 +572,23 @@ def main():
         model_to_save.save_pretrained(args.output_dir)
         tokenizer.save_pretrained(args.output_dir)
 
-        # Good practice: save your training arguments together with the trained model
-        torch.save(args, os.path.join(args.output_dir, 'training_args.bin'))
-
-        # Load a trained model and vocabulary that you have fine-tuned
-        model = model_class.from_pretrained(args.output_dir)
-        tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
-        # model.to(args.device)
-        if not args.no_cuda:
-            model.cuda()
+        #Good practice: save your training arguments together with the trained model
+        # if args.horovod:
+        #     if args.hvd.rank() == 0:
+        #         torch.save(str(args), os.path.join(args.output_dir, 'training_args.bin'))
+        #         # Load a trained model and vocabulary that you have fine-tuned
+        #         model = model_class.from_pretrained(args.output_dir)
+        #         tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        #         if not args.no_cuda:
+        #             model.cuda()
+        # else:
+        #     torch.save(args, os.path.join(args.output_dir, 'training_args.bin'))
+        #
+        #     # Load a trained model and vocabulary that you have fine-tuned
+        #     model = model_class.from_pretrained(args.output_dir)
+        #     tokenizer = tokenizer_class.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
+        #     if not args.no_cuda:
+        #         model.cuda()
 
     # Evaluation
     results = []
@@ -590,7 +606,6 @@ def main():
         for _, checkpoint in checkpoints:
             global_step = checkpoint.split('-')[-1] if len(checkpoints) > 1 else ""
             prefix = checkpoint.split('/')[-1] if checkpoint.find('checkpoint') != -1 else ""
-
             model = model_class.from_pretrained(checkpoint)
             # model.to(args.device)
             if not args.no_cuda:
