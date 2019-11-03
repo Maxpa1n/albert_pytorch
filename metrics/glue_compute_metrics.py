@@ -17,6 +17,7 @@
 import csv
 import sys
 import logging
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,20 @@ def pearson_and_spearman(preds, labels):
         "spearmanr": spearman_corr,
         "corr": (pearson_corr + spearman_corr) / 2,
     }
+
+
+def metric_average(args, val, name):
+    tensor = torch.from_numpy(val)
+    avg_tensor = args.hvd.allreduce(tensor, name=name)
+    return avg_tensor.item()
+
+
+def compute_metrics_distribution(args, task_name, preds, labels):
+    assert len(preds) == len(labels)
+    acc = (preds == labels).mean()
+    acc = metric_average(args, acc, 'acc')
+    if task_name == "opmrc":
+        return {"acc": acc}
 
 
 def compute_metrics(task_name, preds, labels):
